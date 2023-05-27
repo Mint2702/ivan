@@ -1,3 +1,4 @@
+import time
 import pprint
 import requests
 import xlsxwriter
@@ -50,48 +51,90 @@ def get_document_url(document: dict) -> list:
     return f"https://www.sec.gov/Archives/edgar/data/{first_num}/{adsh}/{xsl}/{file}"
 
 
+def get_rows(document: BeautifulSoup) -> list:
+    table_1: Tag = document.select_one(
+        'b:-soup-contains("Table I")'
+    ).parent.parent.parent.parent
+    table_1_data = table_1.select_one("tbody")
+    if not table_1_data:
+        return []
+    table_1_data = table_1_data.select("tr")
+    result = []
+    for row in table_1_data:
+        row = [column_raw.text for column_raw in row if column_raw.text not in ["\n"]]
+        result.append(row)
+
+    return result
+
+
 def parse_document(url: str) -> list:
     res = requests.get(url, headers=HEADERS)
     if res.status_code != 200:
         logger.warning(f"Could not get document with url {url}")
         return
     document = BeautifulSoup(res.content, "html.parser")
-    table_1: Tag = document.find(
-        "b",
-        string="Table I - Non-Derivative Securities Acquired, Disposed of, or Beneficially Owned",
-    ).parent.parent.parent.parent
-    table_1_data = table_1.select_one("tbody").select_one("tr")
-    table_1_data = [
-        column_raw.text
-        for column_raw in table_1_data
-        if column_raw.text not in ["\n", ""]
-    ]
-    date = table_1_data[1]
-    transaction_code = table_1_data[2]
-    price = table_1_data[5]
-    shares_amount = table_1_data[3]
+    rows = get_rows(document)
+    if not rows:
+        logger.debug("No table I found")
+        return
+    result = []
+    for row in rows:
+        date = row[1].strip()
+        transaction_code = row[3].strip()
+        shares_amount = row[5].strip()
+        price = row[7].strip()
+        if price == "(1)":
+            continue
+        total_amount: str = row[8].strip()
+        if total_amount.endswith(")"):
+            total_amount = total_amount[:-3]
+        name = (
+            document.select_one('span:-soup-contains("Reporting Person")')
+            .find_next("table")
+            .text
+        )
+        relationship = (
+            document.select_one('span:-soup-contains("Relationship")')
+            .find_next("table")
+            .select_one("tr")
+            .select("td")[1]
+            .text
+        )
 
-    #name = document.select_one("span.FormData").text
+        if (
+            len(date) != 10
+            or len(transaction_code) != 1
+            or not price.startswith("$")
+            or price == "$0"
+        ):
+            logger.debug("Validation not passed")
+            continue
 
-    return {
-        "date": date,
-        "transaction_code": transaction_code,
-        "price": price,
-        "shares_amount": shares_amount,
-        #"name": name
-    }
+        row_data = {
+            "date": date,
+            "transaction_code": transaction_code,
+            "price": price,
+            "shares_amount": shares_amount,
+            "url": url,
+            "name": name,
+            "total_amount": total_amount,
+            "relationship": relationship,
+        }
+
+        result.append(row_data)
+
+    return result
 
 
 def write_excel(data: dict, worksheet, row: int) -> None:
-    # worksheet.write(row, 0, data["name"])
-    if len(data["date"]) != 10 or len(data["transaction_code"]):
-        return
-
+    worksheet.write(row, 0, data["name"])
+    worksheet.write(row, 1, data["relationship"])
     worksheet.write(row, 2, data["date"])
     worksheet.write(row, 3, data["transaction_code"])
     worksheet.write(row, 4, data["price"])
     worksheet.write(row, 5, data["shares_amount"])
-    # worksheet.write(row, 7, data["price"])
+    worksheet.write(row, 7, data["total_amount"])
+    worksheet.write(row, 9, data["url"])
 
 
 workbook = xlsxwriter.Workbook("hello.xlsx")
@@ -106,19 +149,34 @@ columns = [
     "Value",
     "Shares total",
     "SEC Form 4",
+    "Url",
 ]
 for col, column in enumerate(columns):
     worksheet.write(0, col, column)
 
 json = get_entity_data("Apple Inc. (AAPL) (CIK 0000320193)", "0000320193")
 documents_urls = [get_document_url(document) for document in json["hits"]["hits"]]
-for row, document_url in enumerate(documents_urls):
+row = 1
+errors = 0
+parsed_wrong = 0
+for document_url in documents_urls:
     print(document_url)
     try:
-        document_dict = parse_document(document_url)
-        #pprint.pp(document_dict)
-        write_excel(document_dict, worksheet, row + 1)
-    except:
+        if document_data := parse_document(document_url):
+            for row_data in document_data:
+                write_excel(row_data, worksheet, row)
+                row += 1
+        else:
+            parsed_wrong += 1
+        time.sleep(0.02)
+    except Exception as exc:
+        time.sleep(1)
+        errors += 1
+        print(f"Error: {exc}")
         continue
+
+logger.info(f"Success portion: {(row - 1)/len(documents_urls) * 100}%")
+logger.info(f"Errors portion: {errors/len(documents_urls) * 100}%")
+logger.info(f"Parsed wrong portion: {parsed_wrong/len(documents_urls) * 100}%")
 
 workbook.close()
