@@ -1,0 +1,5 @@
+openpyxl
+loguru
+requests
+bs4
+xlsxwriter

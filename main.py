@@ -1,54 +1,17 @@
 import time
-import pprint
 import requests
-import xlsxwriter
+import openpyxl
+from loguru import logger
 from bs4 import BeautifulSoup, Tag
 
-from loguru import logger
-
-
-HEADERS = {
-    "accept": "application/json, text/javascript, */*; q=0.01",
-    "accept-encoding": "gzip, deflate, br",
-    "accept-language": "ru,en;q=0.9",
-    "origin": "https://www.sec.gov",
-    "referer": "https://www.sec.gov/",
-    "sec-ch-ua": '"Chromium";v="104", " Not A;Brand";v="99", "Yandex";v="22"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Linux"',
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-site",
-    "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.5112.114 YaBrowser/22.9.1.1110 (beta) Yowser/2.5 Safari/537.36",
-}
-
-
-def get_entity_data(entity: str, cicks: str) -> str:
-    url = "https://efts.sec.gov/LATEST/search-index"
-    params = {
-        "category": "form-cat2",
-        "ciks": cicks,
-        "entityName": entity,
-        "filter_forms": 4,
-        "startdt": "2018-05-05",
-        "enddt": "2023-05-05",
-    }
-
-    res = requests.get(url, params=params, headers=HEADERS)
-
-    if res.status_code == 200:
-        return res.json()
-    else:
-        logger.warning(
-            f"Could not get html for page with entity == {entity}. Got {res.status_code} status code"
-        )
-
-
-def get_document_url(document: dict) -> list:
-    first_num = int(document["_source"]["ciks"][1])
-    adsh: str = document["_source"]["adsh"].replace("-", "")
-    xsl = document["_source"]["xsl"]
-    file = document["_id"].split(":")[-1]
-    return f"https://www.sec.gov/Archives/edgar/data/{first_num}/{adsh}/{xsl}/{file}"
+from helpers import (
+    remove_brakets,
+    create_excel_tamplate,
+    get_company_data,
+    HEADERS,
+    get_company_urls,
+    get_cik,
+)
 
 
 def get_rows(document: BeautifulSoup) -> list:
@@ -78,36 +41,45 @@ def parse_document(url: str) -> list:
         logger.debug("No table I found")
         return
     result = []
+    validation_errors_count = 0
     for row in rows:
         date = row[1].strip()
-        transaction_code = row[3].strip()
-        shares_amount = row[5].strip()
-        price = row[7].strip()
-        if price == "(1)":
-            continue
-        total_amount: str = row[8].strip()
-        if total_amount.endswith(")"):
-            total_amount = total_amount[:-3]
+        transaction_code = remove_brakets(row[3].strip())
+        shares_amount = remove_brakets(row[5].strip().replace(",", ""))
+        if shares_amount:
+            shares_amount = float(shares_amount)
+        price = remove_brakets(row[7].strip())
+        if price.startswith("$"):
+            price = price[1:]
+            price.replace(",", "")
+            price = float(price)
+        # if price == "(1)":
+        #     continue
+        total_amount: str = remove_brakets(row[8].strip())
         name = (
             document.select_one('span:-soup-contains("Reporting Person")')
             .find_next("table")
             .text
         )
-        relationship = (
-            document.select_one('span:-soup-contains("Relationship")')
-            .find_next("table")
-            .select_one("tr")
-            .select("td")[1]
-            .text
-        )
+        try:
+            relationship = (
+                document.select_one('span:-soup-contains("Relationship")')
+                .find_next("table")
+                .select("tr")[2]
+                .select_one("span")
+                .text
+            )
+        except:
+            relationship = None
+        ad = row[6].strip()
 
         if (
             len(date) != 10
             or len(transaction_code) != 1
-            or not price.startswith("$")
-            or price == "$0"
+            # or not price.startswith("$")
+            # or price == "$0"
         ):
-            logger.debug("Validation not passed")
+            validation_errors_count += 1
             continue
 
         row_data = {
@@ -119,9 +91,12 @@ def parse_document(url: str) -> list:
             "name": name,
             "total_amount": total_amount,
             "relationship": relationship,
+            "ad": ad,
         }
 
         result.append(row_data)
+
+    logger.debug(f"Errors: {validation_errors_count}/{len(rows)}")
 
     return result
 
@@ -133,50 +108,60 @@ def write_excel(data: dict, worksheet, row: int) -> None:
     worksheet.write(row, 3, data["transaction_code"])
     worksheet.write(row, 4, data["price"])
     worksheet.write(row, 5, data["shares_amount"])
+    if isinstance(data["price"], float) and isinstance(data["shares_amount"], float):
+        worksheet.write(row, 6, data["shares_amount"])
     worksheet.write(row, 7, data["total_amount"])
-    worksheet.write(row, 9, data["url"])
+    worksheet.write(row, 9, data["ad"])
+    worksheet.write(row, 10, data["url"])
 
 
-workbook = xlsxwriter.Workbook("hello.xlsx")
-worksheet = workbook.add_worksheet()
-columns = [
-    "Insider trading",
-    "Relationship",
-    "Date",
-    "Transaction",
-    "Price",
-    "Shares (amount)",
-    "Value",
-    "Shares total",
-    "SEC Form 4",
-    "Url",
-]
-for col, column in enumerate(columns):
-    worksheet.write(0, col, column)
+def parse_company(entity: str, cicks: str):
+    workbook, worksheet = create_excel_tamplate(entity)
 
-json = get_entity_data("Apple Inc. (AAPL) (CIK 0000320193)", "0000320193")
-documents_urls = [get_document_url(document) for document in json["hits"]["hits"]]
-row = 1
-errors = 0
-parsed_wrong = 0
-for document_url in documents_urls:
-    print(document_url)
-    try:
+    company_data = get_company_data(entity, cicks)
+    documents_urls = get_company_urls(company_data, entity, cicks)
+    row = 1
+    errors = 0
+    parsed_wrong = 0
+    for document_url in documents_urls:
+        print(document_url)
+        # try:
         if document_data := parse_document(document_url):
             for row_data in document_data:
                 write_excel(row_data, worksheet, row)
                 row += 1
         else:
             parsed_wrong += 1
-        time.sleep(0.02)
-    except Exception as exc:
-        time.sleep(1)
-        errors += 1
-        print(f"Error: {exc}")
-        continue
+        time.sleep(0.2)
+        # except Exception as exc:
+        #     time.sleep(1)
+        #     errors += 1
+        #     print(f"Error: {exc}")
+        #     continue
 
-logger.info(f"Success portion: {(row - 1)/len(documents_urls) * 100}%")
-logger.info(f"Errors portion: {errors/len(documents_urls) * 100}%")
-logger.info(f"Parsed wrong portion: {parsed_wrong/len(documents_urls) * 100}%")
+    logger.info(f"Success portion: {(row - 1)/len(documents_urls) * 100}%")
+    logger.info(f"Errors portion: {errors/len(documents_urls) * 100}%")
+    logger.info(f"Parsed wrong portion: {parsed_wrong/len(documents_urls) * 100}%")
 
-workbook.close()
+    workbook.close()
+
+
+def parse_companies(file_name="companies.xlsx"):
+    file = openpyxl.load_workbook(file_name)
+    wsheet = file.active
+    companies = []
+    for row in wsheet.iter_rows(max_row=30):
+        for cell in row:
+            if not cell.value:
+                break
+            companies.append(cell.value)
+
+    logger.debug(f"Companies found: {companies}")
+    for company in companies:
+        cik = get_cik(company)
+        parse_company(company, cik)
+
+
+if __name__ == "__main__":
+    parse_company("Walmart Inc. (WMT) (CIK 0000104169)", "0000104169")
+    # parse_companies()
