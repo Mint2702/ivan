@@ -150,7 +150,7 @@ def parse_companies(file_name="companies.xlsx"):
     file = openpyxl.load_workbook(file_name)
     wsheet = file.active
     companies = []
-    for row in wsheet.iter_rows(max_row=30):
+    for row in wsheet.iter_rows(max_row=300):
         for cell in row:
             if not cell.value:
                 break
