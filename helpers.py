@@ -29,7 +29,7 @@ def remove_brakets(string: str) -> str:
 
 def create_excel_tamplate(entity: str) -> Tuple[xlsxwriter.Workbook, Any]:
     company_name = get_company_name(entity)
-    workbook = xlsxwriter.Workbook("company_name.xlsx")
+    workbook = xlsxwriter.Workbook(f"{company_name}.xlsx")
     worksheet = workbook.add_worksheet()
     columns = [
         "Insider trading",

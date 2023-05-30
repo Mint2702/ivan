@@ -51,7 +51,7 @@ def parse_document(url: str) -> list:
         price = remove_brakets(row[7].strip())
         if price.startswith("$"):
             price = price[1:]
-            price.replace(",", "")
+            price = price.replace(",", "")
             price = float(price)
         # if price == "(1)":
         #     continue
@@ -163,5 +163,5 @@ def parse_companies(file_name="companies.xlsx"):
 
 
 if __name__ == "__main__":
-    parse_company("Walmart Inc. (WMT) (CIK 0000104169)", "0000104169")
-    # parse_companies()
+    # parse_company("Walmart Inc. (WMT) (CIK 0000104169)", "0000104169")
+    parse_companies()
