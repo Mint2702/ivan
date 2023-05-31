@@ -107,4 +107,6 @@ def get_cik(name: str) -> str:
 
 
 def get_company_name(name: str) -> str:
-    return name.split()[0]
+    name = name.split()[0]
+    name = name.replace("/", "")
+    return name
